@@ -1,7 +1,8 @@
-﻿using Azure.Storage.Sas;
+﻿using Azure.Identity;
+using Azure.Storage.Sas;
 using Azure.Storage;
 using Azure.Storage.Blobs;
-
+using Azure.Storage.Blobs.Models;
 using Microsoft.Extensions.Configuration;
 using System;
 using System.Threading.Tasks;
@@ -14,7 +15,7 @@ namespace StorageAccountAccessKeyGen
         static readonly string DemoContainer = "demo";
         static readonly string DemoFile = "myfile.txt";
 
-        static async Task Main(string[] args)
+        static async Task Main()
         {
             var builder = new ConfigurationBuilder()
                 .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
@@ -23,18 +24,25 @@ namespace StorageAccountAccessKeyGen
             IConfigurationRoot configuration = builder.Build();
             string storageConnectionString = configuration["storageConnectionString"];
 
-            // Simple file SAS URI
+            Console.WriteLine("Scenario #1: Simple file SAS URI with connection string");
             var blobClient = GetBlobContainerClient(storageConnectionString, DemoContainer);
             bool canGenerateSasUri = blobClient.CanGenerateSasUri;
             Uri sasUri = GenerateSasReadUriForFile(DemoFile, 5, blobClient);
+            Console.WriteLine(sasUri + "\r\n");
 
-            // Storage account SAS URI
+            Console.WriteLine("Scenario #2: Storage account SAS URI for Storage Explorer to list/download blobs");
             var kvPairs = GetKeyValuePairsFromStorageConnectionString(storageConnectionString);
             var accountName = kvPairs["AccountName"];
             var accountKey = kvPairs["AccountKey"];
             var blobServiceEndpoint = $"https://{accountName}.blob.core.windows.net";
             Uri accountSasUri = GetAccountSas(accountName, accountKey, blobServiceEndpoint, 10);
+            Console.WriteLine(accountSasUri + "\r\n");
 
+            // Make sure to verify Azure Service Authentication / Account Selection in Tools / Options !
+            Console.WriteLine("Scenario #3: Using Managed Identity / AAD credentials instead of connection strings");
+            BlobServiceClient blobClientTokenCred = new BlobServiceClient(new Uri(blobServiceEndpoint), new VisualStudioCredential());
+            Uri sasUri_UserDelegationKey = await GenerateSasReadUriForFile_UserDelegationKey(blobClientTokenCred, DemoContainer, DemoFile, 5);
+            Console.WriteLine(sasUri_UserDelegationKey + "\r\n");
         }
 
         static BlobContainerClient GetBlobContainerClient(string storageConnectionString, string containerName)
@@ -94,6 +102,48 @@ namespace StorageAccountAccessKeyGen
             sasUri.Query = sas.ToSasQueryParameters(credential).ToString();
 
             return sasUri.Uri;
+        }
+
+        // Parts are from https://stackoverflow.com/a/59973193/141927 and other comments pieced together for my use case
+        static async Task<Uri> GenerateSasReadUriForFile_UserDelegationKey(BlobServiceClient blobServiceClient, string containerName, string blobName, int expiresInHours)
+        {
+            // This is a rather expensive call, best to create one user delegation key for a longer period and cache it
+            UserDelegationKey userDelegationKey = await blobServiceClient.GetUserDelegationKeyAsync
+            (
+                DateTimeOffset.UtcNow,
+                DateTimeOffset.UtcNow.AddMinutes(5d)
+            ).ConfigureAwait(false);
+
+            BlobSasBuilder sasBuilder = new BlobSasBuilder()
+            {
+                BlobContainerName = containerName,
+                BlobName = blobName,
+                Resource = "b",
+                StartsOn = DateTimeOffset.UtcNow,
+                ExpiresOn = DateTimeOffset.UtcNow.AddHours(expiresInHours)
+            };
+
+            sasBuilder.SetPermissions(BlobSasPermissions.Read);
+
+            string sasToken = sasBuilder.ToSasQueryParameters(userDelegationKey, blobServiceClient.AccountName).ToString();
+
+            UriBuilder fullUri = new UriBuilder()
+            {
+                Scheme = "https",
+                Host = string.Format("{0}.blob.core.windows.net", blobServiceClient.AccountName),
+                Path = string.Format("{0}/{1}", containerName, blobName),
+                Query = sasToken
+            };
+
+            return fullUri.Uri;
+
+            //// Another way to go
+            //BlobUriBuilder blobUriBuilder = new(blobServiceClient.Uri)
+            //{
+            //    Sas = sasBuilder.ToSasQueryParameters(userDelegationKey, blobServiceClient.AccountName)
+            //};
+
+            //var uri = blobUriBuilder.ToUri();
         }
     }
 }
