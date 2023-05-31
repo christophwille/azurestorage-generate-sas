@@ -24,6 +24,11 @@ namespace StorageAccountAccessKeyGen
             IConfigurationRoot configuration = builder.Build();
             string storageConnectionString = configuration["storageConnectionString"];
 
+            var kvPairs = GetKeyValuePairsFromStorageConnectionString(storageConnectionString);
+            var accountName = kvPairs["AccountName"];
+            var accountKey = kvPairs["AccountKey"];
+            var blobServiceEndpoint = $"https://{accountName}.blob.core.windows.net";
+
             Console.WriteLine("Scenario #1: Simple file SAS URI with connection string");
             var blobClient = GetBlobContainerClient(storageConnectionString, DemoContainer);
             bool canGenerateSasUri = blobClient.CanGenerateSasUri;
@@ -31,18 +36,19 @@ namespace StorageAccountAccessKeyGen
             Console.WriteLine(sasUri + "\r\n");
 
             Console.WriteLine("Scenario #2: Storage account SAS URI for Storage Explorer to list/download blobs");
-            var kvPairs = GetKeyValuePairsFromStorageConnectionString(storageConnectionString);
-            var accountName = kvPairs["AccountName"];
-            var accountKey = kvPairs["AccountKey"];
-            var blobServiceEndpoint = $"https://{accountName}.blob.core.windows.net";
             Uri accountSasUri = GetAccountSas(accountName, accountKey, blobServiceEndpoint, 10);
             Console.WriteLine(accountSasUri + "\r\n");
 
             // Make sure to verify Azure Service Authentication / Account Selection in Tools / Options !
             Console.WriteLine("Scenario #3: Using Managed Identity / AAD credentials instead of connection strings");
             BlobServiceClient blobClientTokenCred = new BlobServiceClient(new Uri(blobServiceEndpoint), new VisualStudioCredential());
+            bool canTokenCredClientGenerateSasUri = blobClient.CanGenerateSasUri;
             Uri sasUri_UserDelegationKey = await GenerateSasReadUriForFile_UserDelegationKey(blobClientTokenCred, DemoContainer, DemoFile, 5);
             Console.WriteLine(sasUri_UserDelegationKey + "\r\n");
+
+            Console.WriteLine("Scenario #4: Get a connection string for multiple services in one go");
+            string multiConnectionString = GetAccountSasMultiServiceConnectionString(accountName, accountKey, 10);
+            Console.WriteLine(multiConnectionString + "\r\n");
         }
 
         static BlobContainerClient GetBlobContainerClient(string storageConnectionString, string containerName)
@@ -102,6 +108,27 @@ namespace StorageAccountAccessKeyGen
             sasUri.Query = sas.ToSasQueryParameters(credential).ToString();
 
             return sasUri.Uri;
+        }
+
+        static string GetAccountSasMultiServiceConnectionString(string storageAccountName, string storageAccountKey, int expiresInHours)
+        {
+            AccountSasBuilder sas = new AccountSasBuilder
+            {
+                Services = AccountSasServices.Blobs | AccountSasServices.Tables,
+                ResourceTypes = AccountSasResourceTypes.All,
+                ExpiresOn = DateTimeOffset.UtcNow.AddHours(expiresInHours),
+                Protocol = SasProtocol.Https
+            };
+
+            sas.SetPermissions(AccountSasPermissions.Read | AccountSasPermissions.List);
+
+            StorageSharedKeyCredential credential = new StorageSharedKeyCredential(storageAccountName, storageAccountKey);
+            string sasQuery = sas.ToSasQueryParameters(credential).ToString();
+
+            var blobServiceEndpoint = $"https://{storageAccountName}.blob.core.windows.net";
+            var tableServiceEndpoint = $"https://{storageAccountName}.blob.table.windows.net";
+
+            return $"BlobEndpoint={blobServiceEndpoint};TableEndpoint={tableServiceEndpoint};SharedAccessSignature={sasQuery}";
         }
 
         // Parts are from https://stackoverflow.com/a/59973193/141927 and other comments pieced together for my use case
